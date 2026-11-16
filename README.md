@@ -1,4 +1,11 @@
-# 舞萌 Telegram Bot
+> [!CAUTION]
+> **AI SLOP WARNING** ⚠️  
+> All in all, this is the only line in this project that I wrote. The rest was generated ENTIRELY by AI. I make no guarantees regarding its quality, and using the code in this repository is very likely to result in unforeseen consequences. You have been warned!  
+
+> ~~Assisted-by:~~ ***Assisted***? Relly? I hate dishonesty  
+> Generated-by: GPT-6.1-Sol Max, GPT-6.1-Sol High
+
+# wahlap has moved to telegram 之舞萌DX
 
 通过 [maiserver](https://github.com/Redbeanw44602/maiserver) 在 Telegram 私聊中获取玩家二维码、打开 maimai DX NET。支持多用户，每人独立设置自己的 endpoint 和认证 Token。
 
