@@ -12,7 +12,7 @@ class Target {
 
 function createHarness(source, options = {}) {
   const rafs = [], timers = new Map();
-  let timerId = 0, readyCalls = 0;
+  let timerId = 0, readyCalls = 0, closeCalls = 0;
   const window = new Target();
   const stage = new Target();
   stage.clientWidth = 360;
@@ -54,7 +54,8 @@ function createHarness(source, options = {}) {
   }
   const response = {ok:true,body:{scope,path:scope+'maimai-mobile/home/'}};
   window.Telegram = {WebApp:{
-    initData:options.initData ?? 'signed',ready(){readyCalls++;},expand(){},onEvent(){},BackButton:back
+    initData:options.initData ?? 'signed',ready(){readyCalls++;},expand(){},onEvent(){},
+    close(){closeCalls++;},BackButton:back
   }};
   const sandbox = {
     window,location,history,URL,console,
@@ -91,6 +92,7 @@ function createHarness(source, options = {}) {
   return {
     window,stage,nodes,scope,back,history,entries,response,settle,stylesheet,redirect,
     readyCalls:()=>readyCalls,
+    closeCalls:()=>closeCalls,
     visible:()=>stage.children.filter(frame=>frame.style.visibility==='visible'),
     ready:frame=>window.WahlapNet.ready(frame.contentWindow),
     timeout:()=>{[...timers.values()].forEach(fn=>fn());},

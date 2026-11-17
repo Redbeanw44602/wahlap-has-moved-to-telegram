@@ -167,7 +167,7 @@ assert.deepEqual(h.visible(),[next]);
 assert.equal(initial.removed,true);
 assert.equal(h.stage.children.length,1);
 assert.equal(h.readyCalls(),1);
-assert.equal(h.entries.length,2);
+assert.equal(h.entries.length,1);
 assert.equal(h.back.visible,true);
 """)
 
@@ -186,8 +186,8 @@ assert.deepEqual(h.visible(),[initial]);
 h.ready(second); await h.settle();
 assert.deepEqual(h.visible(),[second]);
 assert.equal(first.removed,true);
-assert.equal(h.entries.length,2);
-assert.match(h.history.state.wahlapNet.path,/second/);
+assert.equal(h.entries.length,1);
+assert.match(second.src,/second/);
 assert.equal(h.navigate(first,h.scope+'maimai-mobile/late/'),false);
 assert.equal(h.navigate(second,'https://evil.example/net/p/session/'),false);
 assert.equal(h.navigate(second,second.src+'#anchor'),false);
@@ -202,20 +202,109 @@ for(const name of ['record','friend']) {
   h.navigate(current,h.scope+'maimai-mobile/'+name+'/');
   current=h.stage.children[1];h.ready(current);await h.settle();
 }
-assert.equal(h.entries.length,3);
-assert.equal(h.history.state.wahlapNet.index,2);
+assert.equal(h.entries.length,1);
+assert.equal(h.back.visible,true);
 h.back.click();
 assert.deepEqual(h.visible(),[current]);
 let previous = h.stage.children[1];
 assert.match(previous.src,/record/);
 h.ready(previous);await h.settle();
 assert.deepEqual(h.visible(),[previous]);
-assert.equal(h.entries.length,3);
-assert.equal(h.history.state.wahlapNet.index,1);
+assert.equal(h.entries.length,1);
+assert.equal(h.back.visible,true);
 h.back.click();previous=h.stage.children[1];
 h.ready(previous);await h.settle();
 assert.match(previous.src,/home/);
 assert.equal(h.back.visible,false);
+""")
+
+
+def test_android_back_ignores_iframe_browser_history_and_closes_at_root():
+    check_navigation("""
+assert.equal(h.back.visible,false);
+h.ready(initial); await h.settle();
+h.history.back=()=>{throw new Error('iframe browser history must not handle Mini App back');};
+h.navigate(initial,h.scope+'maimai-mobile/record/');
+const record=h.stage.children[1];h.ready(record);await h.settle();
+h.back.click();
+const home=h.stage.children[1];
+assert.match(home.src,/home/);
+assert.equal(h.back.visible,false);
+h.ready(home);await h.settle();
+assert.deepEqual(h.visible(),[home]);
+// An already queued Android back event at the root must close, not do nothing.
+h.back.click();
+assert.equal(h.closeCalls(),1);
+assert.equal(h.entries.length,1);
+""")
+
+
+def test_home_link_resets_return_stack_even_with_query_or_fragment():
+    check_navigation("""
+h.ready(initial);await h.settle();
+h.navigate(initial,h.scope+'maimai-mobile/record/');
+const record=h.stage.children[1];h.ready(record);await h.settle();
+h.navigate(record,h.scope+'maimai-mobile/home/?from=record#top');
+const home=h.stage.children[1];h.ready(home);await h.settle();
+assert.equal(h.back.visible,false);
+h.back.click();
+assert.equal(h.closeCalls(),1);
+assert.equal(h.stage.children.length,1);
+""")
+
+
+def test_native_navigation_to_home_resets_return_stack():
+    check_navigation("""
+h.ready(initial);await h.settle();
+h.navigate(initial,h.scope+'maimai-mobile/record/');
+const record=h.stage.children[1];h.ready(record);await h.settle();
+assert.equal(h.back.visible,true);
+h.window.WahlapNet.native(record.contentWindow);
+h.redirect(record,h.scope+'maimai-mobile/home/');
+h.ready(record);await h.settle();
+assert.equal(h.back.visible,false);
+h.back.click();
+assert.equal(h.closeCalls(),1);
+""")
+
+
+def test_repeated_back_cancels_pending_pages_and_late_loads_cannot_restore_them():
+    check_navigation("""
+h.ready(initial);await h.settle();
+let current=initial;
+for (const name of ['record','friend']) {
+  h.navigate(current,h.scope+'maimai-mobile/'+name+'/');
+  current=h.stage.children[1];h.ready(current);await h.settle();
+}
+h.back.click();
+const record=h.stage.children[1];
+h.back.click();
+const home=h.stage.children[1];
+assert.equal(record.removed,true);
+assert.match(home.src,/home/);
+assert.equal(h.back.visible,false);
+h.ready(record);await h.settle();
+assert.deepEqual(h.visible(),[current]);
+h.ready(home);await h.settle();
+assert.deepEqual(h.visible(),[home]);
+h.back.click();
+assert.equal(h.closeCalls(),1);
+""")
+
+
+def test_reloading_current_page_does_not_add_a_return_step():
+    check_navigation("""
+h.ready(initial);await h.settle();
+h.navigate(initial,h.scope+'maimai-mobile/record/');
+const record=h.stage.children[1];h.ready(record);await h.settle();
+h.navigate(record,record.src);
+const refreshed=h.stage.children[1];h.ready(refreshed);await h.settle();
+h.back.click();
+const home=h.stage.children[1];h.ready(home);await h.settle();
+assert.match(home.src,/home/);
+assert.equal(h.back.visible,false);
+h.back.click();
+assert.equal(h.closeCalls(),1);
 """)
 
 
@@ -286,7 +375,7 @@ css.sheet={};css.dispatch('load');await h.settle();
 assert.deepEqual(h.visible(),[initial]);
 h.ready(next);await h.settle();
 assert.deepEqual(h.visible(),[next]);
-assert.match(h.history.state.wahlapNet.path,/final/);
+assert.match(next.src,/final/);
 """
     )
 

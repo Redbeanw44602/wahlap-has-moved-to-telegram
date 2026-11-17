@@ -8,6 +8,8 @@ let pending = null;
 let sessionScope = null;
 let retryPath = null;
 let appReady = false;
+let pageHistory = [];
+let homePath = null;
 app?.expand();
 
 function readyApp() {
@@ -61,20 +63,38 @@ function removeFrame(entry) {
 function updateBackButton() {
   const back = app?.BackButton;
   if (back) {
-    if (history.state?.wahlapNet?.index > 0) back.show();
+    if (pageHistory.length > 1) back.show();
     else back.hide();
   }
 }
 
 function remember(path, mode) {
-  const state = history.state || {};
-  const index = state.wahlapNet?.index || 0;
-  if (mode === 'push') {
-    history.pushState({...state, wahlapNet:{path,index:index + 1}}, '');
-  } else if (mode !== 'traverse') {
-    history.replaceState({...state, wahlapNet:{path,index}}, '');
+  const url = ownUrl(path);
+  if (!url) return;
+  // iframe navigation has its own browser history. Keep the Mini App's return
+  // stack separate so Android's back event cannot get stuck traversing it.
+  if (mode === 'initial' || !pageHistory.length || url.pathname.replace(/\/$/, '') === homePath) {
+    pageHistory = [url.href];
+  } else if (mode === 'push') {
+    if (pageHistory.at(-1) !== url.href) pageHistory.push(url.href);
+  } else {
+    pageHistory[pageHistory.length - 1] = url.href;
   }
   updateBackButton();
+}
+
+function goBack() {
+  removeFrame(pending);
+  pending = null;
+  stage.removeAttribute('aria-busy');
+  if (pageHistory.length <= 1) {
+    updateBackButton();
+    app?.close();
+    return;
+  }
+  pageHistory.pop();
+  updateBackButton();
+  loadPage(pageHistory.at(-1), 'replace');
 }
 
 function showError(message, path = null) {
@@ -114,7 +134,16 @@ function pageReady(source) {
     return;
   }
   observeDocument(entry, doc);
-  if (entry === active) { scheduleFit(entry); return; }
+  if (entry === active) {
+    // Native POST submissions and script redirects can change the active frame
+    // without passing through navigate(). A return to home still ends the stack.
+    if (entry.url !== source.location.href) {
+      entry.url = source.location.href;
+      remember(entry.url, 'push');
+    }
+    scheduleFit(entry);
+    return;
+  }
   if (entry.revealingDocument === doc) return;
   entry.revealingDocument = doc;
   // DOMContentLoaded may precede stylesheet loading. Keep the old document
@@ -138,6 +167,7 @@ function pageReady(source) {
       entry.node.removeAttribute('aria-hidden');
       stage.removeAttribute('aria-busy');
       errorBox.hidden = true;
+      entry.url = source.location.href;
       remember(source.location.href, entry.historyMode);
       removeFrame(previous);
       readyApp();
@@ -194,12 +224,9 @@ function resize() {
   if (pending) scheduleFit(pending);
 }
 window.addEventListener('resize', resize);
-window.addEventListener('popstate', event => {
-  const path = event.state?.wahlapNet?.path;
-  if (path && ownUrl(path)) loadPage(path, 'traverse');
-});
 app?.onEvent('viewportChanged', resize);
-app?.BackButton?.onClick(() => history.back());
+app?.BackButton?.onClick(goBack);
+updateBackButton();
 
 async function openNet() {
   errorBox.hidden = true;
@@ -213,6 +240,9 @@ async function openNet() {
     const result = await response.json();
     if (!response.ok) throw new Error(result.error || '暂时无法打开，请稍后重试。');
     sessionScope = result.scope;
+    homePath = new URL(result.path, location.href).pathname.replace(/\/$/, '');
+    pageHistory = [];
+    updateBackButton();
     loadPage(result.path, 'initial');
   } catch (error) {
     showError(error.message);
