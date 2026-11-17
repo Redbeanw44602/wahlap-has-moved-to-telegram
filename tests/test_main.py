@@ -40,6 +40,6 @@ def test_remaining_startup_rate_limit_reports_wait_time_instead_of_generic_confi
     with pytest.raises(SystemExit) as exc:
         entry.main()
     assert exc.value.code == 1
-    assert "限流" in caplog.text and "23.5" in caplog.text
-    assert "网关配置" not in caplog.text
+    assert "rate limited" in caplog.text and "23.5" in caplog.text
+    assert "configuration" not in caplog.text
     loop.close.assert_called_once()

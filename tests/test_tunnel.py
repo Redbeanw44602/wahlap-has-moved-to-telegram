@@ -241,7 +241,7 @@ async def test_unexpected_child_exit_marks_tunnel_unavailable_without_leaking_lo
         process.exit(1)
         await tunnel._reader
         assert not tunnel.running
-        assert "NET 隧道不可用" in caplog.text
+        assert "NET tunnel unavailable" in caplog.text
         assert "private-token" not in caplog.text
     finally:
         await tunnel.close()

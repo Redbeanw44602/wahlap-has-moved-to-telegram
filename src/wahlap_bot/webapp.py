@@ -18,7 +18,7 @@ from aiohttp import web
 
 from .config import Settings, normalize_webapp_url
 from .endpoints import UserEndpoint
-from .logging_utils import describe_error
+from .logging_utils import DiagnosticError, describe_error
 from .maiserver import MaiserverClient
 from .net_cache import AssetCache, AssetKey, ProxyPayload
 from .storage import UserStore
@@ -50,7 +50,7 @@ HOP_HEADERS = {
 }
 
 
-class WebAppAuthError(ValueError):
+class WebAppAuthError(DiagnosticError, ValueError):
     pass
 
 
@@ -107,28 +107,39 @@ def _static_response(payload: ProxyPayload, tail: str) -> bool:
 
 def validate_init_data(value: str, bot_token: str, *, now: float | None = None) -> int:
     if not isinstance(value, str) or len(value) > 16384:
-        raise WebAppAuthError("Telegram 身份信息无效，请重新打开小程序。")
+        raise WebAppAuthError(
+            "Telegram 身份信息无效，请重新打开小程序。", reason="invalid_init_data"
+        )
+    reason = "invalid_query_string"
     try:
         pairs = parse_qsl(value, keep_blank_values=True, strict_parsing=True, max_num_fields=32)
         fields = dict(pairs)
         if len(fields) != len(pairs):
+            reason = "duplicate_fields"
             raise ValueError
+        reason = "missing_hash"
         supplied_hash = fields.pop("hash")
         check = "\n".join(f"{key}={fields[key]}" for key in sorted(fields))
         key = hmac.digest(b"WebAppData", bot_token.encode(), "sha256")
         expected = hmac.digest(key, check.encode(), "sha256").hex()
         if not hmac.compare_digest(expected, supplied_hash):
+            reason = "hash_mismatch"
             raise ValueError
+        reason = "invalid_auth_date"
         auth_date = int(fields["auth_date"])
         age = (time.time() if now is None else now) - auth_date
         if not -30 <= age <= 300:
+            reason = "init_data_expired"
             raise ValueError
+        reason = "invalid_user_id"
         user_id = json.loads(fields["user"])["id"]
         if type(user_id) is not int or user_id <= 0:
             raise ValueError
         return user_id
     except (ValueError, KeyError, TypeError, UnicodeError) as exc:
-        raise WebAppAuthError("Telegram 身份校验失败或已过期，请关闭后重新打开小程序。") from exc
+        raise WebAppAuthError(
+            "Telegram 身份校验失败或已过期，请关闭后重新打开小程序。", reason=reason
+        ) from exc
 
 
 def _account_fingerprint(user: UserEndpoint) -> str:
@@ -164,13 +175,15 @@ class SessionStore:
 
     def get(self, sid: str, cookie: str) -> NetSession:
         session = self.sessions.get(sid)
-        if (
-            session is None
-            or session.expires_at <= time.time()
-            or not hmac.compare_digest(session.cookie_secret, cookie)
-        ):
-            raise WebAppAuthError("小程序会话已失效，请从机器人重新打开。")
-        return session
+        if session is None:
+            reason = "session_missing"
+        elif session.expires_at <= time.time():
+            reason = "session_expired"
+        elif not hmac.compare_digest(session.cookie_secret, cookie):
+            reason = "cookie_mismatch"
+        else:
+            return session
+        raise WebAppAuthError("小程序会话已失效，请从机器人重新打开。", reason=reason)
 
     def revoke(self, user_id: int) -> None:
         self.sessions = {
@@ -304,7 +317,7 @@ class NetGateway:
             except web.HTTPException:
                 raise
             except Exception as exc:
-                logger.error("NET 网关异常 error=%s", describe_error(exc))
+                logger.error("NET gateway failed error=%s", describe_error(exc))
                 raise
 
         app = web.Application(client_max_size=2 * 1024 * 1024, middlewares=[log_errors])
@@ -321,7 +334,7 @@ class NetGateway:
                 self.runner, self.settings.webapp_listen_host, self.settings.webapp_listen_port
             ).start()
             logger.info(
-                "NET 网关已监听 port=%s cache=%sMiB ttl=%ss",
+                "NET gateway listening port=%s cache=%sMiB ttl=%ss",
                 self.settings.webapp_listen_port,
                 self.settings.webapp_cache_max_mb,
                 self.settings.webapp_cache_ttl,
@@ -406,30 +419,34 @@ class NetGateway:
                 {"error": "请求来源无效。"}, status=403, headers=_base_headers()
             )
         try:
+            validation_stage = "parse_json"
             data = await request.json()
+            validation_stage = "validate_init_data"
             user_id = validate_init_data(data["init_data"], self.settings.bot_token)
-        except (ValueError, KeyError, TypeError, UnicodeError):
-            logger.warning("NET 身份校验失败")
+        except (ValueError, KeyError, TypeError, UnicodeError) as exc:
+            logger.warning(
+                "NET authentication failed stage=%s error=%s", validation_stage, describe_error(exc)
+            )
             return web.json_response(
                 {"error": "Telegram 身份校验失败，请关闭后从机器人重新打开。"},
                 status=401,
                 headers=_base_headers(),
             )
         if self.settings.allowed_user_ids and user_id not in self.settings.allowed_user_ids:
-            logger.warning("NET 拒绝访问 user=%s reason=无权限", user_id)
+            logger.warning("NET access denied user=%s reason=not_allowed", user_id)
             return web.json_response(
                 {"error": "此账号无权使用。"}, status=403, headers=_base_headers()
             )
         user = await self.store.get(user_id)
         if user is None:
-            logger.info("NET 拒绝访问 user=%s reason=未配置账号", user_id)
+            logger.info("NET access denied user=%s reason=account_missing", user_id)
             return web.json_response(
                 {"error": "请先私聊机器人发送 /start 设置 endpoint。"},
                 status=403,
                 headers=_base_headers(),
             )
         sid, session = self.sessions.create(user)
-        logger.info("NET 会话已创建 user=%s", user_id)
+        logger.info("NET session created user=%s", user_id)
         scope = self.prefix + "p/" + sid + "/"
         response = web.json_response(
             {"path": scope + "maimai-mobile/home/", "scope": scope}, headers=_base_headers()
@@ -451,7 +468,7 @@ class NetGateway:
                 request.match_info["sid"], request.cookies.get(COOKIE_NAME, "")
             )
         except WebAppAuthError as exc:
-            logger.debug("NET 会话无效")
+            logger.debug("NET session invalid error=%s", describe_error(exc))
             return _page(str(exc), 401)
         if (
             request.method not in {"GET", "HEAD", "OPTIONS"}
@@ -460,13 +477,14 @@ class NetGateway:
             return _page("请求来源无效。", 403)
         user = await self.store.get(session.user_id)
         if user is None or _account_fingerprint(user) != session.account_fingerprint:
-            logger.debug("NET 会话配置已失效 user=%s", session.user_id)
+            logger.debug("NET session revoked user=%s reason=account_changed", session.user_id)
             return _page("账号设置已变更，请从机器人重新打开。", 401)
         if self.settings.allowed_user_ids and session.user_id not in self.settings.allowed_user_ids:
             return _page("此账号无权使用。", 403)
         try:
             tail = _safe_tail(request.match_info["tail"])
-        except (ValueError, UnicodeError):
+        except (ValueError, UnicodeError) as exc:
+            logger.debug("NET path rejected user=%s error=%s", session.user_id, describe_error(exc))
             return _page("无效的页面路径。", 400)
         scope = self.prefix + "p/" + request.match_info["sid"]
         url = user.api_url("maimai-dx/reverse-proxy/") + tail
@@ -518,7 +536,7 @@ class NetGateway:
             else:
                 payload = await load()
             logger.debug(
-                "NET 请求 user=%s method=%s status=%s cache=%s elapsed=%.2fs",
+                "NET request user=%s method=%s status=%s cache=%s elapsed=%.2fs",
                 user.user_id,
                 request.method,
                 payload.status,
@@ -527,7 +545,7 @@ class NetGateway:
             )
             if payload.status >= 400:
                 logger.warning(
-                    "NET 回源失败 user=%s status=%s elapsed=%.2fs",
+                    "NET upstream failed user=%s status=%s elapsed=%.2fs",
                     user.user_id,
                     payload.status,
                     time.monotonic() - started,
@@ -540,7 +558,9 @@ class NetGateway:
                 location = rewrite_text(location, scope)
                 parsed = urlsplit(location)
                 if parsed.scheme or parsed.netloc:
-                    logger.warning("NET 回源失败 user=%s reason=站外跳转", user.user_id)
+                    logger.warning(
+                        "NET upstream failed user=%s reason=external_redirect", user.user_id
+                    )
                     return _page("后端返回了站外跳转，请重新打开小程序。", 502)
                 if (
                     location.startswith("/")
@@ -565,14 +585,25 @@ class NetGateway:
                     for key in ("expires", "pragma", "date", "age"):
                         forwarded.pop(key, None)
             return web.Response(body=response_body, status=payload.status, headers=forwarded)
-        except _ProxyResponseTooLarge:
-            logger.warning("NET 回源失败 user=%s reason=响应过大", user.user_id)
-            return _page("后端响应过大。", 502)
-        except TimeoutError:
+        except _ProxyResponseTooLarge as exc:
             logger.warning(
-                "NET 回源超时 user=%s elapsed=%.2fs", user.user_id, time.monotonic() - started
+                "NET upstream failed user=%s limit_bytes=%s error=%s",
+                user.user_id,
+                MAX_PROXY_BYTES,
+                describe_error(exc),
+            )
+            return _page("后端响应过大。", 502)
+        except TimeoutError as exc:
+            logger.warning(
+                "NET upstream timed out user=%s elapsed=%.2fs timeout=%.2fs error=%s",
+                user.user_id,
+                time.monotonic() - started,
+                self.settings.api_timeout,
+                describe_error(exc),
             )
             return _page("maiserver 响应超时，请稍后重试。", 504)
         except aiohttp.ClientError as exc:
-            logger.warning("NET 连接失败 user=%s error=%s", user.user_id, describe_error(exc))
+            logger.warning(
+                "NET connection failed user=%s error=%s", user.user_id, describe_error(exc)
+            )
             return _page("暂时无法连接 maiserver，请检查机器人中的 endpoint。", 502)

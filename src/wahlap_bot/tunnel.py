@@ -9,6 +9,7 @@ from contextlib import suppress
 from pathlib import Path
 
 from .config import Settings, normalize_webapp_url
+from .logging_utils import DiagnosticError, describe_error
 
 logger = logging.getLogger(__name__)
 PROCESS_EXIT_TIMEOUT = 5
@@ -39,7 +40,7 @@ RUNTIME_ENV = {
 }
 
 
-class CloudflaredError(Exception):
+class CloudflaredError(DiagnosticError):
     """A safe startup error; never contains the child's raw output or a token."""
 
 
@@ -79,7 +80,12 @@ class CloudflaredTunnel:
             raise RuntimeError("cloudflared has already been started")
         self._closing = False
         self._ready = asyncio.get_running_loop().create_future()
-        logger.info("cloudflared 启动 mode=%s", self.settings.cloudflared_mode)
+        logger.info(
+            "cloudflared starting mode=%s protocol=%s timeout=%.1fs",
+            self.settings.cloudflared_mode,
+            self.settings.cloudflared_protocol,
+            self.settings.cloudflared_startup_timeout,
+        )
         try:
             # Ignore ~/.cloudflared/config.yml and inherited TUNNEL_* variables:
             # a user's unrelated tunnel must not change what gets published.
@@ -117,22 +123,28 @@ class CloudflaredTunnel:
                 asyncio.shield(self._ready), self.settings.cloudflared_startup_timeout
             )
             if not self.running:
-                raise CloudflaredError("cloudflared 在建立连接后退出，请检查隧道配置。")
-            logger.info("cloudflared 已连接 mode=%s url=%s", self.settings.cloudflared_mode, url)
+                raise CloudflaredError(
+                    "cloudflared 在建立连接后退出，请检查隧道配置。", reason="exited_after_ready"
+                )
+            logger.info("cloudflared connected mode=%s url=%s", self.settings.cloudflared_mode, url)
             return url
-        except FileNotFoundError:
+        except FileNotFoundError as exc:
             await self.close()
             raise CloudflaredError(
-                "未找到 cloudflared，请先安装，或通过 CLOUDFLARED_BIN 设置可执行文件路径。"
-            ) from None
-        except TimeoutError:
+                "未找到 cloudflared，请先安装，或通过 CLOUDFLARED_BIN 设置可执行文件路径。",
+                reason="executable_not_found",
+            ) from exc
+        except TimeoutError as exc:
             await self.close()
             raise CloudflaredError(
-                "等待 cloudflared 连接超时，请检查网络、Tunnel Token 和启动超时配置。"
-            ) from None
-        except OSError:
+                "等待 cloudflared 连接超时，请检查网络、Tunnel Token 和启动超时配置。",
+                reason="connection_timeout",
+            ) from exc
+        except OSError as exc:
             await self.close()
-            raise CloudflaredError("无法启动 cloudflared，请检查可执行文件及运行权限。") from None
+            raise CloudflaredError(
+                "无法启动 cloudflared，请检查可执行文件及运行权限。", reason="spawn_failed"
+            ) from exc
         except BaseException:
             await self.close()
             raise
@@ -161,20 +173,22 @@ class CloudflaredTunnel:
                         self.public_url = normalize_webapp_url(url)
                         self._ready.set_result(self.public_url)
             await self.process.wait()
-        except (OSError, ValueError):
-            pass
+        except (OSError, ValueError) as exc:
+            logger.error("cloudflared output reader failed error=%s", describe_error(exc))
         finally:
             if not self._closing:
                 if not self._ready.done():
                     self._ready.set_exception(
                         CloudflaredError(
                             "cloudflared 未能建立隧道，"
-                            "请检查网络、Tunnel Token 和 cloudflared 版本。"
+                            "请检查网络、Tunnel Token 和 cloudflared 版本。",
+                            reason="exited_before_ready",
                         )
                     )
                 elif self.public_url:
                     logger.error(
-                        "NET 隧道不可用，cloudflared 退出 code=%s", self.process.returncode
+                        "NET tunnel unavailable; cloudflared exited code=%s",
+                        self.process.returncode,
                     )
 
     async def close(self) -> None:

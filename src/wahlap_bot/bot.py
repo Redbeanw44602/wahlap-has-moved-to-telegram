@@ -124,9 +124,11 @@ class BotHandlers:
             explanation = "当前账号没有使用此机器人的权限。"
         if explanation:
             logger.warning(
-                "拒绝访问 user=%s reason=%s",
+                "Access denied user=%s reason=%s",
                 update.effective_user.id,
-                "非私聊" if update.effective_chat.type != ChatType.PRIVATE else "无权限",
+                "private_chat_required"
+                if update.effective_chat.type != ChatType.PRIVATE
+                else "not_allowed",
             )
             if update.callback_query:
                 await update.callback_query.answer(explanation, show_alert=True)
@@ -153,7 +155,7 @@ class BotHandlers:
             if command in {"/" + item.command for item in BOT_COMMANDS} | {"/skip"}:
                 action = command
         if action is not None:
-            logger.info("用户操作 user=%s action=%s", update.effective_user.id, action)
+            logger.info("User action user=%s action=%s", update.effective_user.id, action)
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await self._discard_draft(update, context)
@@ -238,7 +240,7 @@ class BotHandlers:
     ) -> None:
         draft = context.user_data[DRAFT]
         await self.store.save(UserEndpoint(update.effective_user.id, draft["endpoint"], token))
-        logger.info("配置已保存 user=%s auth=%s", update.effective_user.id, bool(token))
+        logger.info("Account saved user=%s auth=%s", update.effective_user.id, bool(token))
         if self.gateway is not None:
             self.gateway.revoke_user(update.effective_user.id)
         context.user_data.pop(DRAFT, None)
@@ -281,7 +283,7 @@ class BotHandlers:
 
     async def reset(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await self.store.delete(update.effective_user.id)
-        logger.info("配置已删除 user=%s", update.effective_user.id)
+        logger.info("Account deleted user=%s", update.effective_user.id)
         if self.gateway is not None:
             self.gateway.revoke_user(update.effective_user.id)
         await self._discard_draft(update, context)
@@ -349,13 +351,13 @@ class BotHandlers:
                     feature_menu("qrcode"),
                 )
             logger.info(
-                "二维码已发送 user=%s elapsed=%.2fs", user.user_id, time.monotonic() - started
+                "QR code sent user=%s elapsed=%.2fs", user.user_id, time.monotonic() - started
             )
         except MaiserverError as exc:
             logger.warning(
-                "二维码获取失败 user=%s reason=%s",
+                "QR code failed user=%s error=%s",
                 user.user_id,
-                str(exc).split("，", 1)[0].rstrip("。"),
+                describe_error(exc),
             )
             await show_message(update, str(exc), target=status, reply_markup=feature_menu("qrcode"))
             return
@@ -367,7 +369,7 @@ class BotHandlers:
         if user is None:
             return
         if self.tunnel is not None and not self.tunnel.running:
-            logger.warning("NET 打开失败 user=%s reason=隧道不可用", user.user_id)
+            logger.warning("NET open failed user=%s reason=tunnel_unavailable", user.user_id)
             await show_message(
                 update,
                 "NET 的 HTTPS 隧道暂时不可用，请联系机器人运行者重启服务。",
@@ -414,13 +416,13 @@ class BotHandlers:
                 target=status,
             )
             logger.info(
-                "NET 链接已发送 user=%s elapsed=%.2fs", user.user_id, time.monotonic() - started
+                "NET link sent user=%s elapsed=%.2fs", user.user_id, time.monotonic() - started
             )
         except MaiserverError as exc:
             logger.warning(
-                "NET 链接获取失败 user=%s reason=%s",
+                "NET link failed user=%s error=%s",
                 user.user_id,
-                str(exc).split("，", 1)[0].rstrip("。"),
+                describe_error(exc),
             )
             await show_message(update, str(exc), target=status, reply_markup=feature_menu("net"))
             return
@@ -467,10 +469,12 @@ class BotHandlers:
         )
         if isinstance(error, RetryAfter):
             logger.warning(
-                "Telegram 限流 user=%s retry_after=%.1fs", user_id, retry_after_seconds(error)
+                "Telegram rate limited user=%s retry_after=%.1fs",
+                user_id,
+                retry_after_seconds(error),
             )
         else:
-            logger.error("请求失败 user=%s error=%s", user_id, describe_error(error))
+            logger.error("Request failed user=%s error=%s", user_id, describe_error(error))
         if isinstance(update, Update) and update.effective_message:
             with suppress(TelegramError):
                 await show_message(
@@ -495,7 +499,7 @@ def create_application(settings: Settings, *, bot: ExtBot | None = None) -> Appl
             await handlers.profile.close()
 
     async def shutdown(_application: Application) -> None:
-        logger.info("运行资源清理")
+        logger.info("Closing runtime resources")
         async with AsyncExitStack() as cleanup:
             cleanup.push_async_callback(store.close)
             if handlers.client is not None:
@@ -505,28 +509,37 @@ def create_application(settings: Settings, *, bot: ExtBot | None = None) -> Appl
             if handlers.tunnel is not None:
                 cleanup.push_async_callback(handlers.tunnel.close)
             cleanup.push_async_callback(stop_profile, _application)
-        logger.info("运行资源已关闭")
+        logger.info("Runtime resources closed")
 
     async def initialize(application: Application) -> None:
+        stage = "database"
         try:
             await store.open()
-            logger.info("数据库已就绪")
+            logger.info("Database ready")
+            stage = "api_client"
             handlers.client = MaiserverClient(create_api_session(), settings.api_timeout)
             if settings.webapp_public_url or settings.cloudflared_mode != "off":
+                stage = "net_gateway"
                 handlers.gateway = NetGateway(settings, store, handlers.client)
                 await handlers.gateway.start()
             if settings.cloudflared_mode != "off":
+                stage = "cloudflared"
                 handlers.tunnel = CloudflaredTunnel(settings)
                 public_url = await handlers.tunnel.start()
                 handlers.gateway.set_public_url(public_url)
+            stage = "command_menu"
             handlers.profile = BotCommandsSync(application.bot, BOT_COMMANDS)
             await handlers.profile.start()
             logger.info(
-                "机器人初始化完成 net=%s access=%s",
-                "网关" if handlers.gateway is not None else "授权链接",
-                "受限" if settings.allowed_user_ids else "所有用户",
+                "Bot initialized net=%s access=%s",
+                "gateway" if handlers.gateway is not None else "auth_link",
+                "restricted" if settings.allowed_user_ids else "all_users",
             )
-        except BaseException:
+        except BaseException as exc:
+            if isinstance(exc, Exception):
+                logger.error(
+                    "Bot initialization failed stage=%s error=%s", stage, describe_error(exc)
+                )
             await shutdown(application)
             raise
 

@@ -10,6 +10,8 @@ from typing import TypeVar
 from telegram import Bot, BotCommand, BotCommandScopeAllPrivateChats
 from telegram.error import RetryAfter, TelegramError
 
+from .logging_utils import describe_error
+
 logger = logging.getLogger(__name__)
 T = TypeVar("T")
 
@@ -31,7 +33,7 @@ async def _request(endpoint: str, operation: Callable[[], Awaitable[T]]) -> T:
         return await operation()
     except RetryAfter as exc:
         logger.warning(
-            "Telegram %s 限流，%.1f 秒后重试",
+            "Telegram %s rate limited; retry in %.1fs",
             endpoint,
             retry_after_seconds(exc) + 0.5,
         )
@@ -54,9 +56,9 @@ class BotCommandsSync:
                 "setMyCommands",
                 partial(self.bot.set_my_commands, self.commands, scope=self.scope),
             )
-            logger.info("命令菜单已更新")
+            logger.info("Command menu updated")
         else:
-            logger.debug("命令菜单无需更新")
+            logger.debug("Command menu unchanged")
 
     async def _attempt(self, label: str, operation: Callable[[], Awaitable[None]]) -> float | None:
         try:
@@ -65,7 +67,7 @@ class BotCommandsSync:
             return retry_after_seconds(exc) + 0.5
         except TelegramError as exc:
             # Error text may contain request URLs or credentials.
-            logger.warning("%s同步失败：%s", label, type(exc).__name__)
+            logger.warning("%s sync failed error=%s", label, describe_error(exc))
         return None
 
     async def _retry(
@@ -81,13 +83,14 @@ class BotCommandsSync:
     def _finished(self, task: asyncio.Task) -> None:
         self._tasks.discard(task)
         if not task.cancelled() and (error := task.exception()) is not None:
-            logger.error("命令菜单同步失败：%s", type(error).__name__)
+            logger.error("Command menu sync failed error=%s", describe_error(error))
 
     async def start(self) -> None:
-        delay = await self._attempt("命令菜单", self._sync_commands)
+        delay = await self._attempt("Command menu", self._sync_commands)
         if delay is not None:
             task = asyncio.create_task(
-                self._retry("命令菜单", self._sync_commands, delay), name="telegram-commands-retry"
+                self._retry("Command menu", self._sync_commands, delay),
+                name="telegram-commands-retry",
             )
             self._tasks.add(task)
             task.add_done_callback(self._finished)

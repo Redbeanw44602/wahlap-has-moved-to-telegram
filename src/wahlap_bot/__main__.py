@@ -35,25 +35,23 @@ def main() -> None:
     asyncio.set_event_loop(loop)
     try:
         application = create_application(settings)
-        logging.getLogger(__name__).info("机器人启动")
+        logging.getLogger(__name__).info("Bot starting")
         application.run_polling(
             allowed_updates=[Update.MESSAGE, Update.CALLBACK_QUERY], bootstrap_retries=3
         )
-        logging.getLogger(__name__).info("机器人已停止")
+        logging.getLogger(__name__).info("Bot stopped")
     except RetryAfter as exc:
         logging.getLogger(__name__).error(
-            "Telegram 启动限流，%.1f 秒后可重启",
+            "Telegram startup rate limited; restart after %.1fs",
             retry_after_seconds(exc) + 0.5,
         )
         raise SystemExit(1) from None
     except CloudflaredError as exc:
-        logging.getLogger(__name__).error(
-            "隧道启动失败：%s", str(exc).split("，", 1)[0].rstrip("。")
-        )
+        logging.getLogger(__name__).error("Tunnel startup failed error=%s", describe_error(exc))
         raise SystemExit(1) from None
     except Exception as exc:
         logging.getLogger(__name__).error(
-            "机器人退出：%s",
+            "Bot exited error=%s",
             describe_error(exc),
         )
         raise SystemExit(1) from None
