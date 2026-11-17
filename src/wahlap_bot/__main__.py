@@ -10,6 +10,7 @@ from telegram.error import RetryAfter
 
 from .bot import create_application
 from .config import Settings
+from .logging_utils import describe_error
 from .profile import retry_after_seconds
 from .tunnel import CloudflaredError
 
@@ -34,23 +35,26 @@ def main() -> None:
     asyncio.set_event_loop(loop)
     try:
         application = create_application(settings)
-        logging.getLogger(__name__).info("正在启动 Telegram 机器人。")
+        logging.getLogger(__name__).info("机器人启动")
         application.run_polling(
             allowed_updates=[Update.MESSAGE, Update.CALLBACK_QUERY], bootstrap_retries=3
         )
+        logging.getLogger(__name__).info("机器人已停止")
     except RetryAfter as exc:
         logging.getLogger(__name__).error(
-            "Telegram 启动请求持续受到限流，至少等待 %.1f 秒后再启动。",
+            "Telegram 启动限流，%.1f 秒后可重启",
             retry_after_seconds(exc) + 0.5,
         )
         raise SystemExit(1) from None
     except CloudflaredError as exc:
-        logging.getLogger(__name__).error("机器人已停止：%s", exc)
+        logging.getLogger(__name__).error(
+            "隧道启动失败：%s", str(exc).split("，", 1)[0].rstrip("。")
+        )
         raise SystemExit(1) from None
     except Exception as exc:
         logging.getLogger(__name__).error(
-            "机器人已停止（%s），请检查 Token、网络、代理、数据库路径和网关配置。",
-            type(exc).__name__,
+            "机器人退出：%s",
+            describe_error(exc),
         )
         raise SystemExit(1) from None
     finally:

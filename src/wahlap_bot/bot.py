@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import time
 from contextlib import AsyncExitStack, suppress
 from datetime import datetime, timedelta, timezone
 
@@ -15,7 +16,7 @@ from telegram import (
     WebAppInfo,
 )
 from telegram.constants import ChatType
-from telegram.error import TelegramError
+from telegram.error import RetryAfter, TelegramError
 from telegram.ext import (
     Application,
     ApplicationHandlerStop,
@@ -32,9 +33,10 @@ from telegram.ext import (
 from .concurrency import PerUserUpdateProcessor
 from .config import Settings
 from .endpoints import UserEndpoint, normalize_endpoint, validate_auth_token
+from .logging_utils import describe_error
 from .maiserver import MaiserverClient, MaiserverError, create_api_session
 from .messages import clear_buttons, same_message, show_message, show_photo
-from .profile import BotCommandsSync
+from .profile import BotCommandsSync, retry_after_seconds
 from .storage import UserStore
 from .tunnel import CloudflaredTunnel
 from .webapp import NetGateway
@@ -121,11 +123,37 @@ class BotHandlers:
         ):
             explanation = "当前账号没有使用此机器人的权限。"
         if explanation:
+            logger.warning(
+                "拒绝访问 user=%s reason=%s",
+                update.effective_user.id,
+                "非私聊" if update.effective_chat.type != ChatType.PRIVATE else "无权限",
+            )
             if update.callback_query:
                 await update.callback_query.answer(explanation, show_alert=True)
             elif update.effective_message and (update.effective_message.text or "").startswith("/"):
                 await update.effective_message.reply_text(explanation)
             raise ApplicationHandlerStop
+        # Log only known action names, never command arguments or setup messages.
+        action = None
+        if update.callback_query is not None:
+            if update.callback_query.data in {
+                "qrcode",
+                "net",
+                "settings",
+                "endpoint",
+                "token",
+                "skip_token",
+                "cancel",
+                "menu",
+            }:
+                action = update.callback_query.data
+        elif update.effective_message and update.effective_message.text:
+            words = update.effective_message.text.split(maxsplit=1)
+            command = words[0].split("@", 1)[0] if words else ""
+            if command in {"/" + item.command for item in BOT_COMMANDS} | {"/skip"}:
+                action = command
+        if action is not None:
+            logger.info("用户操作 user=%s action=%s", update.effective_user.id, action)
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await self._discard_draft(update, context)
@@ -210,6 +238,7 @@ class BotHandlers:
     ) -> None:
         draft = context.user_data[DRAFT]
         await self.store.save(UserEndpoint(update.effective_user.id, draft["endpoint"], token))
+        logger.info("配置已保存 user=%s auth=%s", update.effective_user.id, bool(token))
         if self.gateway is not None:
             self.gateway.revoke_user(update.effective_user.id)
         context.user_data.pop(DRAFT, None)
@@ -252,6 +281,7 @@ class BotHandlers:
 
     async def reset(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await self.store.delete(update.effective_user.id)
+        logger.info("配置已删除 user=%s", update.effective_user.id)
         if self.gateway is not None:
             self.gateway.revoke_user(update.effective_user.id)
         await self._discard_draft(update, context)
@@ -303,6 +333,7 @@ class BotHandlers:
         if user is None:
             return
         status = await show_message(update, "正在获取新的玩家二维码，请稍候……")
+        started = time.monotonic()
         try:
             qr = await self.client.get_qrcode(user)
             image = await asyncio.to_thread(qr.png)
@@ -317,7 +348,15 @@ class BotHandlers:
                     caption,
                     feature_menu("qrcode"),
                 )
+            logger.info(
+                "二维码已发送 user=%s elapsed=%.2fs", user.user_id, time.monotonic() - started
+            )
         except MaiserverError as exc:
+            logger.warning(
+                "二维码获取失败 user=%s reason=%s",
+                user.user_id,
+                str(exc).split("，", 1)[0].rstrip("。"),
+            )
             await show_message(update, str(exc), target=status, reply_markup=feature_menu("qrcode"))
             return
         except Exception as exc:
@@ -328,6 +367,7 @@ class BotHandlers:
         if user is None:
             return
         if self.tunnel is not None and not self.tunnel.running:
+            logger.warning("NET 打开失败 user=%s reason=隧道不可用", user.user_id)
             await show_message(
                 update,
                 "NET 的 HTTPS 隧道暂时不可用，请联系机器人运行者重启服务。",
@@ -357,6 +397,7 @@ class BotHandlers:
             )
             return
         status = await show_message(update, "正在获取 maimai DX NET 授权链接，请稍候……")
+        started = time.monotonic()
         try:
             url = await self.client.get_net_url(user)
             await show_message(
@@ -372,7 +413,15 @@ class BotHandlers:
                 ),
                 target=status,
             )
+            logger.info(
+                "NET 链接已发送 user=%s elapsed=%.2fs", user.user_id, time.monotonic() - started
+            )
         except MaiserverError as exc:
+            logger.warning(
+                "NET 链接获取失败 user=%s reason=%s",
+                user.user_id,
+                str(exc).split("，", 1)[0].rstrip("。"),
+            )
             await show_message(update, str(exc), target=status, reply_markup=feature_menu("net"))
             return
         except Exception as exc:
@@ -411,7 +460,17 @@ class BotHandlers:
         self, update: object, error: BaseException, *, target: Message | None = None
     ) -> None:
         # Exception messages/tracebacks can include request URLs or Telegram tokens.
-        logger.error("处理请求失败：%s", type(error).__name__)
+        user_id = (
+            update.effective_user.id
+            if isinstance(update, Update) and update.effective_user is not None
+            else None
+        )
+        if isinstance(error, RetryAfter):
+            logger.warning(
+                "Telegram 限流 user=%s retry_after=%.1fs", user_id, retry_after_seconds(error)
+            )
+        else:
+            logger.error("请求失败 user=%s error=%s", user_id, describe_error(error))
         if isinstance(update, Update) and update.effective_message:
             with suppress(TelegramError):
                 await show_message(
@@ -436,6 +495,7 @@ def create_application(settings: Settings, *, bot: ExtBot | None = None) -> Appl
             await handlers.profile.close()
 
     async def shutdown(_application: Application) -> None:
+        logger.info("运行资源清理")
         async with AsyncExitStack() as cleanup:
             cleanup.push_async_callback(store.close)
             if handlers.client is not None:
@@ -445,10 +505,12 @@ def create_application(settings: Settings, *, bot: ExtBot | None = None) -> Appl
             if handlers.tunnel is not None:
                 cleanup.push_async_callback(handlers.tunnel.close)
             cleanup.push_async_callback(stop_profile, _application)
+        logger.info("运行资源已关闭")
 
     async def initialize(application: Application) -> None:
         try:
             await store.open()
+            logger.info("数据库已就绪")
             handlers.client = MaiserverClient(create_api_session(), settings.api_timeout)
             if settings.webapp_public_url or settings.cloudflared_mode != "off":
                 handlers.gateway = NetGateway(settings, store, handlers.client)
@@ -459,6 +521,11 @@ def create_application(settings: Settings, *, bot: ExtBot | None = None) -> Appl
                 handlers.gateway.set_public_url(public_url)
             handlers.profile = BotCommandsSync(application.bot, BOT_COMMANDS)
             await handlers.profile.start()
+            logger.info(
+                "机器人初始化完成 net=%s access=%s",
+                "网关" if handlers.gateway is not None else "授权链接",
+                "受限" if settings.allowed_user_ids else "所有用户",
+            )
         except BaseException:
             await shutdown(application)
             raise

@@ -21,6 +21,27 @@ from wahlap_bot.tunnel import CloudflaredError
 from wahlap_bot.webapp import NetGateway
 
 
+async def test_operation_logs_exclude_command_arguments_credentials_and_unknown_callbacks(
+    bot, caplog
+):
+    caplog.set_level("INFO", logger="wahlap_bot")
+    await bot.send(101, "/endpoint https://private.example/api")
+    await bot.send(101, "private-auth-token")
+    await bot.click(101, "unknown-private-callback")
+    await bot.send(101, "   ")
+    assert "user=101 action=/endpoint" in caplog.text
+    assert "配置已保存 user=101 auth=True" in caplog.text
+    assert "private" not in caplog.text
+
+
+async def test_unexpected_errors_log_user_and_safe_error_details(bot, caplog):
+    bot.handlers.client.get_net_url.side_effect = RuntimeError("private-auth-url")
+    await configure(bot, 101, "https://private.example", "private-token")
+    await bot.send(101, "/net")
+    assert "请求失败 user=101 error=RuntimeError" in caplog.text
+    assert "private" not in caplog.text
+
+
 class TestGatewayLifecycle:
     @pytest.fixture
     def bot_settings(self, tmp_path, monkeypatch):

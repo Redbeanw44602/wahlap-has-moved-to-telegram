@@ -107,6 +107,51 @@ def proxy_request(gateway, user=FIRST, *, tail="maimai-mobile/home/", **kwargs):
     )
 
 
+async def test_gateway_logs_sessions_and_failures_without_auth_or_urls(gateway, caplog):
+    caplog.set_level("INFO", logger="wahlap_bot")
+    response = await gateway.create_session(request(data={"init_data": signed_data()}))
+    assert response.status == 200
+    gateway.client.session.request.return_value = Upstream(b"private-body", 429)
+    browser_request = proxy_request(gateway)
+    assert (await gateway.proxy(browser_request)).status == 429
+    assert "NET 会话已创建 user=101" in caplog.text
+    assert "NET 回源失败 user=101 status=429" in caplog.text
+    for secret in (
+        FIRST.endpoint,
+        FIRST.auth_token,
+        BOT_TOKEN,
+        signed_data(),
+        "private-body",
+        browser_request.match_info["sid"],
+        browser_request.cookies[COOKIE_NAME],
+    ):
+        assert secret not in caplog.text
+
+
+async def test_cache_request_logs_are_debug_only_and_exclude_paths(gateway, caplog):
+    caplog.set_level("INFO", logger="wahlap_bot")
+    browser_request = proxy_request(gateway, tail="maimai-mobile/img/private-title.png")
+    gateway.client.session.request.return_value = Upstream(
+        b"image", headers={"Content-Type": "image/png"}
+    )
+    await gateway.proxy(browser_request)
+    assert "NET 请求" not in caplog.text
+    caplog.set_level("DEBUG", logger="wahlap_bot")
+    await gateway.proxy(browser_request)
+    assert "status=200 cache=HIT elapsed=" in caplog.text
+    assert "private-title" not in caplog.text
+
+
+async def test_gateway_unexpected_errors_are_logged_without_raw_tracebacks(gateway, caplog):
+    middleware = gateway.application().middlewares[0]
+    handler = AsyncMock(side_effect=RuntimeError("private-url-and-token"))
+    with pytest.raises(RuntimeError):
+        await middleware(make_mocked_request("GET", "/net/"), handler)
+    assert "NET 网关异常 error=RuntimeError" in caplog.text
+    assert "private" not in caplog.text
+    assert not caplog.records[-1].exc_info
+
+
 def test_signed_telegram_identity():
     assert validate_init_data(signed_data(), BOT_TOKEN) == 101
 

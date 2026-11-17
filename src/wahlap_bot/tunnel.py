@@ -79,6 +79,7 @@ class CloudflaredTunnel:
             raise RuntimeError("cloudflared has already been started")
         self._closing = False
         self._ready = asyncio.get_running_loop().create_future()
+        logger.info("cloudflared 启动 mode=%s", self.settings.cloudflared_mode)
         try:
             # Ignore ~/.cloudflared/config.yml and inherited TUNNEL_* variables:
             # a user's unrelated tunnel must not change what gets published.
@@ -117,7 +118,7 @@ class CloudflaredTunnel:
             )
             if not self.running:
                 raise CloudflaredError("cloudflared 在建立连接后退出，请检查隧道配置。")
-            logger.info("cloudflared 隧道已连接（%s 模式）。", self.settings.cloudflared_mode)
+            logger.info("cloudflared 已连接 mode=%s url=%s", self.settings.cloudflared_mode, url)
             return url
         except FileNotFoundError:
             await self.close()
@@ -172,7 +173,9 @@ class CloudflaredTunnel:
                         )
                     )
                 elif self.public_url:
-                    logger.error("cloudflared 已停止，NET 隧道不可用；请重启机器人。")
+                    logger.error(
+                        "NET 隧道不可用，cloudflared 退出 code=%s", self.process.returncode
+                    )
 
     async def close(self) -> None:
         self._closing = True

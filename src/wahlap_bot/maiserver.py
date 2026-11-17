@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 import secrets
 import time
 from dataclasses import dataclass, field
@@ -14,6 +15,7 @@ import qrcode
 from .endpoints import UserEndpoint
 
 MAX_RESPONSE_BYTES = 64 * 1024
+logger = logging.getLogger(__name__)
 
 
 class MaiserverError(Exception):
@@ -175,6 +177,7 @@ class MaiserverClient:
             data = await self._stream_qrcode(user)
         except _StreamUnavailable:
             # Compatibility with older instances/proxies without WebSocket support.
+            logger.debug("二维码 WebSocket 不可用，使用 REST user=%s", user.user_id)
             data = await self._get(user, "auth/qrcode")
         return PlayerQRCode.from_data(data)
 

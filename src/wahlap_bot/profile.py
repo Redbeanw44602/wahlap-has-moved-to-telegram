@@ -31,7 +31,7 @@ async def _request(endpoint: str, operation: Callable[[], Awaitable[T]]) -> T:
         return await operation()
     except RetryAfter as exc:
         logger.warning(
-            "Telegram %s 触发限流，将在 %.1f 秒后自动重试；机器人继续运行。",
+            "Telegram %s 限流，%.1f 秒后重试",
             endpoint,
             retry_after_seconds(exc) + 0.5,
         )
@@ -54,6 +54,9 @@ class BotCommandsSync:
                 "setMyCommands",
                 partial(self.bot.set_my_commands, self.commands, scope=self.scope),
             )
+            logger.info("命令菜单已更新")
+        else:
+            logger.debug("命令菜单无需更新")
 
     async def _attempt(self, label: str, operation: Callable[[], Awaitable[None]]) -> float | None:
         try:
@@ -62,7 +65,7 @@ class BotCommandsSync:
             return retry_after_seconds(exc) + 0.5
         except TelegramError as exc:
             # Error text may contain request URLs or credentials.
-            logger.warning("同步机器人%s失败（%s），暂时保留现有设置。", label, type(exc).__name__)
+            logger.warning("%s同步失败：%s", label, type(exc).__name__)
         return None
 
     async def _retry(
@@ -78,7 +81,7 @@ class BotCommandsSync:
     def _finished(self, task: asyncio.Task) -> None:
         self._tasks.discard(task)
         if not task.cancelled() and (error := task.exception()) is not None:
-            logger.error("同步机器人资料失败：%s", type(error).__name__)
+            logger.error("命令菜单同步失败：%s", type(error).__name__)
 
     async def start(self) -> None:
         delay = await self._attempt("命令菜单", self._sync_commands)
